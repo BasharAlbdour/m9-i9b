@@ -12,9 +12,54 @@ real bug, and a classifier that returns a confident answer on an
 off-template question is the silent-failure mode the Reading warns
 against. Prefer None over a false positive.
 """
-
+import re
 from .shapes import ShapeId
 
+# KG vocabulary — canonical names exactly as stored in Neo4j
+CUISINES = {
+    "World", "Asian", "European", "Americas",
+    "Chinese", "Japanese", "Indian", "Thai",
+    "Sichuan", "Italian", "French", "Spanish",
+    "Tuscan", "Sicilian", "Mexican", "NorthAmerican",
+}
+
+# Cuisines that use SUBCLASS_OF traversal (non-leaf / broad categories)
+HIERARCHICAL_CUISINES = {"World", "Asian", "European", "Americas", "Chinese"}
+
+INGREDIENTS = {
+    "ginger", "garlic", "basil", "orange", "turkey", "sage", "salt",
+    "pepper", "peppercorn", "szechuan peppercorn", "chili", "tomato",
+    "onion", "scallion", "soy sauce", "rice", "rice noodles",
+    "wheat noodles", "egg", "chicken", "beef", "pork", "tofu",
+    "shrimp", "fish", "lemon", "lime", "cilantro", "parsley", "thyme",
+    "rosemary", "oregano", "flour", "butter", "cheese", "cream",
+    "milk", "olive oil", "sesame oil", "vinegar",
+}
+
+TECHNIQUES = {
+    "wok", "braise", "saute", "roast", "grill", "steam",
+    "fry", "bake", "boil", "simmer", "smoke", "poach",
+}
+
+def _find_cuisine(q: str) -> str | None:
+    for c in CUISINES:
+        if c.lower() in q:
+            return c
+    return None
+
+
+def _find_ingredient(q: str) -> str | None:
+    # Longer names first to avoid partial matches (e.g. "szechuan peppercorn" before "peppercorn")
+    for ing in sorted(INGREDIENTS, key=len, reverse=True):
+        if ing in q:
+            return ing
+    return None
+
+
+def _has_ingredient_cue(q: str) -> bool:
+    """Only match ingredient shapes when an explicit cue is present."""
+    return bool(re.search(r'\b(use[sd]?|using|with)\b', q))
+  
 
 def detect_shape(question: str) -> ShapeId | None:
     """Classify the question into one of the 15 ShapeId values, or None.
@@ -48,7 +93,54 @@ def detect_shape(question: str) -> ShapeId | None:
     # 2. Apply rules in priority order — more-specific shapes (q14
     #    "but not", q8 "by ... that use") before less-specific (q1, q3).
     # 3. Return the matching ShapeId, or None if nothing matches.
-    raise NotImplementedError(
-        "detect_shape is not yet implemented — see the Integration Guide "
-        "Intent Classification section and the docstring above."
-    )
+    q = question.lower()
+
+    if "optionally tagged" in q:
+        return ShapeId.Q15
+
+    if re.search(r'\bbut not\b|\bwithout\b', q) and _has_ingredient_cue(q):
+        return ShapeId.Q14
+
+    if re.search(r'or any (subtype|kind)', q):
+        return ShapeId.Q13
+
+    if "ingredients used in" in q:
+        return ShapeId.Q11
+
+    if "authors of" in q:
+        return ShapeId.Q12
+
+    if re.search(r'under \d+ minutes', q):
+        return ShapeId.Q10
+
+    if re.search(r'ranked by popularity|most popular', q):
+        return ShapeId.Q9
+
+    if re.search(r'\bby (author )?\w', q) and _has_ingredient_cue(q):
+        return ShapeId.Q8
+
+    if re.search(r'\bby (author )?\w', q):
+        return ShapeId.Q2
+
+    if re.search(r'\brequire[sd]?\b', q):
+        return ShapeId.Q7
+
+    cuisine = _find_cuisine(q)
+    has_ingredient = _has_ingredient_cue(q) and _find_ingredient(q) is not None
+
+    if cuisine and cuisine in HIERARCHICAL_CUISINES and has_ingredient:
+        return ShapeId.Q6
+
+    if cuisine and has_ingredient:
+        return ShapeId.Q5
+
+    if cuisine and cuisine in HIERARCHICAL_CUISINES:
+        return ShapeId.Q4
+
+    if cuisine:
+        return ShapeId.Q3
+
+    if _has_ingredient_cue(q) and _find_ingredient(q) is not None:
+        return ShapeId.Q1
+
+    return None
